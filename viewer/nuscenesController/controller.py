@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from nuscenes.nuscenes import NuScenes
 from nuscenes.utils.data_classes import LidarPointCloud
 from PIL import Image
+import shutil
 
 
 class NuScenesVisualizer:
@@ -19,6 +20,27 @@ class NuScenesVisualizer:
             "CAM_BACK_LEFT", "CAM_BACK", "CAM_BACK_RIGHT"
         ]
         self.lidar_channel = "LIDAR_TOP"
+        self.selection_start = None
+        self.selection_end = None
+        self.current_ax = None
+        self.current_img = None
+        self.rect = None
+        self.current_img_path = None
+        self.edited_dataset_root = os.path.join(os.path.dirname(dataset_root), "v1.0-mini-edited")
+        
+        # 編集用のフォルダを作成
+        if not os.path.exists(self.edited_dataset_root):
+            os.makedirs(self.edited_dataset_root)
+            # 元のデータセットの構造をコピー
+            for root, dirs, files in os.walk(dataset_root):
+                for dir_name in dirs:
+                    src_dir = os.path.join(root, dir_name)
+                    dst_dir = src_dir.replace(dataset_root, self.edited_dataset_root)
+                    os.makedirs(dst_dir, exist_ok=True)
+                for file_name in files:
+                    src_file = os.path.join(root, file_name)
+                    dst_file = src_file.replace(dataset_root, self.edited_dataset_root)
+                    shutil.copy2(src_file, dst_file)
 
     def get_first_sample_token(self, scene_index=0):
         """
@@ -53,6 +75,63 @@ class NuScenesVisualizer:
         pc = LidarPointCloud.from_file(lidar_path)
         return pc.points  # (4, N) の numpy 配列
 
+    def on_press(self, event):
+        """マウスボタンが押された時のイベントハンドラ"""
+        if event.inaxes != self.current_ax:
+            return
+        self.selection_start = (event.xdata, event.ydata)
+        self.rect = plt.Rectangle(self.selection_start, 0, 0, fill=False, edgecolor='red', linewidth=2)
+        self.current_ax.add_patch(self.rect)
+
+    def on_release(self, event):
+        """マウスボタンが離された時のイベントハンドラ"""
+        if event.inaxes != self.current_ax or not self.selection_start:
+            return
+        self.selection_end = (event.xdata, event.ydata)
+        
+        # 選択範囲の座標を整数に変換
+        x1, y1 = self.selection_start
+        x2, y2 = self.selection_end
+        x1, x2 = sorted([int(x1), int(x2)])
+        y1, y2 = sorted([int(y1), int(y2)])
+        
+        # 画像を黒塗りする
+        if self.current_img and self.current_img_path:
+            # PIL Imageをnumpy配列に変換
+            img_array = np.array(self.current_img)
+            # 選択範囲を黒塗り
+            img_array[y1:y2, x1:x2] = 0
+            # numpy配列をPIL Imageに変換
+            blacked_img = Image.fromarray(img_array)
+            
+            # 編集した画像を保存
+            edited_img_path = self.current_img_path.replace(self.nusc.dataroot, self.edited_dataset_root)
+            blacked_img.save(edited_img_path)
+            
+            # 元の画像を更新
+            self.current_ax.clear()
+            self.current_ax.imshow(blacked_img)
+            self.current_ax.axis("off")
+            plt.draw()
+        
+        # 選択範囲のリセット
+        self.selection_start = None
+        self.selection_end = None
+        if self.rect:
+            self.rect.remove()
+            self.rect = None
+
+    def on_motion(self, event):
+        """マウスが移動した時のイベントハンドラ"""
+        if event.inaxes != self.current_ax or not self.selection_start or not self.rect:
+            return
+        x, y = event.xdata, event.ydata
+        width = x - self.selection_start[0]
+        height = y - self.selection_start[1]
+        self.rect.set_width(width)
+        self.rect.set_height(height)
+        plt.draw()
+
     def visualize_sample(self, sample_token):
         """
         指定したサンプルトークンのカメラ画像と LiDAR 点群を可視化
@@ -67,35 +146,55 @@ class NuScenesVisualizer:
 
         # LiDAR 点群をプロット
         ax_lidar = plt.subplot(3, 3, 5)
-
         ax_lidar.scatter(lidar_points[0, :], lidar_points[1, :], s=1, c=lidar_points[2, :], cmap="viridis")
-        #ax_lidar.set_title("LiDAR Point Cloud")
         ax_lidar.axis("equal")
         ax_lidar.grid(True)
+
         # カメラ画像をプロット
         for i, img in enumerate(images):
             place_idx = i
-            if i>=3:
-                place_idx +=  3
+            if i >= 3:
+                place_idx += 3
             axes[place_idx].imshow(img)
             axes[i].axis("off")
             axes[place_idx].axis("off")
             axes[place_idx].set_title(self.camera_channels[i])
 
-        txt_info= plt.subplot(3, 3, 6)
+            # マウスイベントの接続
+            def on_click(event, ax=axes[place_idx], image=img, img_path=None):
+                if event.inaxes == ax:
+                    self.current_ax = ax
+                    self.current_img = image
+                    self.current_img_path = img_path
+                    self.selection_start = None
+                    self.selection_end = None
+                    if self.rect:
+                        self.rect.remove()
+                        self.rect = None
+
+            # 画像のパスを取得
+            cam_data = self.nusc.get("sample_data", sample["data"][self.camera_channels[i]])
+            img_path = os.path.join(self.nusc.dataroot, cam_data["filename"])
+            
+            fig.canvas.mpl_connect('button_press_event', lambda event, ax=axes[place_idx], image=img, img_path=img_path: on_click(event, ax, image, img_path))
+
+        # マウスイベントの接続
+        fig.canvas.mpl_connect('button_press_event', self.on_press)
+        fig.canvas.mpl_connect('button_release_event', self.on_release)
+        fig.canvas.mpl_connect('motion_notify_event', self.on_motion)
+
+        txt_info = plt.subplot(3, 3, 6)
         sample_token_txt = f"Sample Data: {sample_token}\n"
         scene_index_txt = f"Scene Index: {sample['scene_token']}\n"
         
         cam = self.camera_channels[1]
         sample_data_token = sample['data'][cam]
         sample_data = self.nusc.get('sample_data', sample_data_token)
-        filename_txt=f"{cam}: {sample_data['filename']}"
+        filename_txt = f"{cam}: {sample_data['filename']}"
 
         txt_info.text(0.5, 0.5, sample_token_txt, fontsize=14, ha='center', va='center')
         txt_info.text(0.5, 0.4, scene_index_txt, fontsize=14, ha='center', va='center')
         txt_info.text(0.5, 0.3, filename_txt, fontsize=7, ha='center', va='center')
-
-
 
         plt.tight_layout()
         plt.show()
