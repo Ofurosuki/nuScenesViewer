@@ -92,11 +92,38 @@ class NuScenesVisualizer:
         # 選択範囲の座標を整数に変換
         x1, y1 = self.selection_start
         x2, y2 = self.selection_end
-        x1, x2 = sorted([int(x1), int(x2)])
-        y1, y2 = sorted([int(y1), int(y2)])
+        x1, x2 = sorted([x1, x2])
+        y1, y2 = sorted([y1, y2])
         
-        # 画像を黒塗りする
-        if self.current_img and self.current_img_path:
+        if isinstance(self.current_img, np.ndarray):  # LiDAR点群の場合
+            # 点群データのコピーを作成
+            points = self.current_img.copy()
+            
+            # 選択範囲内の点を黒塗り（z座標を0に設定）
+            mask = (points[0, :] >= x1) & (points[0, :] <= x2) & \
+                   (points[1, :] >= y1) & (points[1, :] <= y2)
+            
+            # 選択範囲内の点のz座標を0に設定
+            points[2, mask] = 0
+            
+            # 点群を更新して表示
+            self.current_ax.clear()
+            scatter = self.current_ax.scatter(points[0, :], points[1, :], s=1, c=points[2, :], cmap="viridis")
+            self.current_ax.axis("equal")
+            self.current_ax.grid(True)
+            
+            # カラーバーを更新
+            if hasattr(self, 'colorbar'):
+                self.colorbar.remove()
+            self.colorbar = plt.colorbar(scatter, ax=self.current_ax)
+            self.colorbar.set_label('Z coordinate')
+            
+            plt.draw()
+            
+        else:  # カメラ画像の場合
+            x1, x2 = int(x1), int(x2)
+            y1, y2 = int(y1), int(y2)
+            
             # PIL Imageをnumpy配列に変換
             img_array = np.array(self.current_img)
             # 選択範囲を黒塗り
@@ -105,8 +132,9 @@ class NuScenesVisualizer:
             blacked_img = Image.fromarray(img_array)
             
             # 編集した画像を保存
-            edited_img_path = self.current_img_path.replace(self.nusc.dataroot, self.edited_dataset_root)
-            blacked_img.save(edited_img_path)
+            if self.current_img_path:
+                edited_img_path = self.current_img_path.replace(self.nusc.dataroot, self.edited_dataset_root)
+                blacked_img.save(edited_img_path)
             
             # 元の画像を更新
             self.current_ax.clear()
@@ -146,9 +174,27 @@ class NuScenesVisualizer:
 
         # LiDAR 点群をプロット
         ax_lidar = plt.subplot(3, 3, 5)
-        ax_lidar.scatter(lidar_points[0, :], lidar_points[1, :], s=1, c=lidar_points[2, :], cmap="viridis")
+        scatter = ax_lidar.scatter(lidar_points[0, :], lidar_points[1, :], s=1, c=lidar_points[2, :], cmap="viridis")
         ax_lidar.axis("equal")
         ax_lidar.grid(True)
+        
+        # カラーバーを追加
+        self.colorbar = plt.colorbar(scatter, ax=ax_lidar)
+        self.colorbar.set_label('Z coordinate')
+
+        # LiDAR点群のマウスイベントを接続
+        def on_lidar_click(event, ax=ax_lidar, points=lidar_points):
+            if event.inaxes == ax:
+                self.current_ax = ax
+                self.current_img = points.copy()  # 点群データのコピーを保持
+                self.current_img_path = None
+                self.selection_start = None
+                self.selection_end = None
+                if self.rect:
+                    self.rect.remove()
+                    self.rect = None
+
+        fig.canvas.mpl_connect('button_press_event', on_lidar_click)
 
         # カメラ画像をプロット
         for i, img in enumerate(images):
